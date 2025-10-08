@@ -1,6 +1,7 @@
 // src/stores/usePlannerStore.js
 import { create } from 'zustand';
 import { produce } from 'immer'; // npm install immer
+import axios from 'axios';
 
 // --- Recursive Helper Functions ---
 
@@ -66,6 +67,9 @@ const removeMilestoneData = (items, milestoneId) => {
 export const usePlannerStore = create((set, get) => ({
   // --- STATE (from your previous code) ---
   mode: 'view', // 'view' or 'edit'
+  hasUnsavedChanges: false, // ✨ NEW STATE: Tracks if any modification has occurred
+  originalScope: null, // ✨ NEW STATE: To hold a snapshot of the scope for reverting
+  originalMilestones: null, // ✨ NEW STATE: To hold a snapshot of milestones for reverting
 
   milestones: [
     { id: "milestone-1", name: "Milestone 1" },
@@ -124,105 +128,132 @@ export const usePlannerStore = create((set, get) => ({
   // Using Immer for easier nested state updates
   // This is much safer than manual spreading
 
-  setMode: (newMode) => set({ mode: newMode }),
+setMode: (newMode) => set(produce(state => {
+    state.mode = newMode;
+    if (newMode === 'edit') {
+      // Create a deep copy snapshot of current state when entering edit mode
+      state.originalScope = JSON.parse(JSON.stringify(state.scope));
+      state.originalMilestones = JSON.parse(JSON.stringify(state.milestones));
+    } else if (newMode === 'view' && !state.hasUnsavedChanges) {
+      // Clear snapshot if we switch back to view without saving
+      state.originalScope = null;
+      state.originalMilestones = null;
+    }
+  })),
 
-  // ✨ NEW: Asynchronous action to save all data to the backend
-  saveData: async () => {
-    set({ isSaving: true, error: null }); // Set saving state
-    try {
-      // Get the relevant parts of the state to save
-      const { scope, milestones } = get();
-      const payload = { scope, milestones };
+  // ✨ NEW ACTION: Revert all changes and switch to view mode
+  revertChanges: () => set(state => ({
+    mode: 'view',
+    hasUnsavedChanges: false,
+    scope: state.originalScope || state.scope, // Revert to snapshot or stay the same
+    milestones: state.originalMilestones || state.milestones,
+    originalScope: null,
+    originalMilestones: null,
+  })),
 
-      const response = await fetch('/api/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
+  // ✨ MODIFIED: Asynchronous action to save all data. Clears changes flag and snapshot.
+  saveData: async () => {
+    set({ isSaving: true, error: null });
+    try {
+      const { scope, milestones } = get();
+      const payload = { scope, milestones };
 
-      if (!response.ok) {
-        throw new Error(`Server error: ${response.statusText}`);
-      }
-      
-      console.log("Data saved successfully!");
-      set({ isSaving: false, mode: 'view' }); // On success, stop saving and switch to view mode
+      const response = await axios.post(
+        "http://localhost:5000/api/save",
+        payload,
+        { headers: { "Content-Type": "application/json" } }
+      );
 
-    } catch (err) {
-      console.error("Failed to save data:", err);
-      set({ isSaving: false, error: err.message }); // Set error state on failure
-    }
-  },
+      console.log("Data saved successfully!", response.data);
+      
+      // ✨ Reset state on successful save
+      set({ 
+        isSaving: false, 
+        mode: "view", 
+        hasUnsavedChanges: false, 
+        originalScope: null, // Clear snapshot
+        originalMilestones: null, // Clear snapshot
+      });
+    } catch (err) {
+      // ... (Error handling remains the same) ...
+      set({ isSaving: false, error: errorMessage });
+    }
+  },
 
-  // Add a new milestone
-  addMilestone: (name) => set(produce(state => {
-    state.milestones.push({ id: crypto.randomUUID(), name });
-  })),
+  // ✨ MODIFIED: All mutator actions now set hasUnsavedChanges: true
 
-  // ✨ NEW: Action to delete a milestone and its associated data
-  deleteMilestone: (milestoneId) => set(produce(state => {
-    // 1. Remove the milestone from the milestones array
-    state.milestones = state.milestones.filter(m => m.id !== milestoneId);
-    // 2. Clean up all corresponding data in the scope tree
-    state.scope = removeMilestoneData(state.scope, milestoneId);
-  })),
+  addMilestone: (name) => set(produce(state => {
+    state.milestones.push({ id: crypto.randomUUID(), name });
+    state.hasUnsavedChanges = true; // Set flag
+  })),
 
-  // ✨ NEW: Action to handle the simple yes/no status of parameters
-  updateParameterValue: (itemId, milestoneId, value) => set(produce(state => {
-    const updateValue = item => {
-      if (!item.values) item.values = {};
-      item.values[milestoneId] = value;
-      return item;
-    };
-    state.scope = findAndUpdate(state.scope, itemId, updateValue);
-  })),
+  deleteMilestone: (milestoneId) => set(produce(state => {
+    state.milestones = state.milestones.filter(m => m.id !== milestoneId);
+    state.scope = removeMilestoneData(state.scope, milestoneId);
+    state.hasUnsavedChanges = true; // Set flag
+  })),
 
-  // ✨ NEW: Action to rename a milestone ✨
-  renameMilestone: (milestoneId, newName) => set(produce(state => {
-    const milestone = state.milestones.find(m => m.id === milestoneId);
-    if (milestone) {
-      milestone.name = newName;
-    }
-  })),
-  
-  renameItem: (itemId, newName) => set(produce(state => {
-    const updateName = item => ({ ...item, name: newName });
-    state.scope = findAndUpdate(state.scope, itemId, updateName);
-  })),
+  updateParameterValue: (itemId, milestoneId, value) => set(produce(state => {
+    const updateValue = item => {
+      if (!item.values) item.values = {};
+      item.values[milestoneId] = value;
+      return item;
+    };
+    state.scope = findAndUpdate(state.scope, itemId, updateValue);
+    state.hasUnsavedChanges = true; // Set flag
+  })),
 
-  toggleExpand: (itemId) => set(produce(state => {
-    const toggle = item => ({ ...item, isExpanded: !item.isExpanded });
-    state.scope = findAndUpdate(state.scope, itemId, toggle);
-  })),
+  renameMilestone: (milestoneId, newName) => set(produce(state => {
+    const milestone = state.milestones.find(m => m.id === milestoneId);
+    if (milestone) {
+      milestone.name = newName;
+      state.hasUnsavedChanges = true; // Set flag
+    }
+  })),
+  
+  renameItem: (itemId, newName) => set(produce(state => {
+    const updateName = item => ({ ...item, name: newName });
+    state.scope = findAndUpdate(state.scope, itemId, updateName);
+    state.hasUnsavedChanges = true; // Set flag
+  })),
 
-  updateCellValue: (itemId, milestoneId, field, value) => set(produce(state => {
-    const updateValue = item => {
-      if (!item.values) item.values = {};
-      // ✨ Ensure new fields are initialized
-      if (!item.values[milestoneId]) {
-        item.values[milestoneId] = { g: '', r: '', responsible: '', status1: '', status2: '' };
-      }
-      item.values[milestoneId][field] = value;
-      return item;
-    };
-    state.scope = findAndUpdate(state.scope, itemId, updateValue);
-  })),
+  toggleExpand: (itemId) => set(produce(state => {
+    // ... (No change to hasUnsavedChanges, this is a UI state change) ...
+    const toggle = item => ({ ...item, isExpanded: !item.isExpanded });
+    state.scope = findAndUpdate(state.scope, itemId, toggle);
+  })),
 
-  addItem: (parentId, newItem) => set(produce(state => {
-    // ✨ Rule: If the new item is an 'element', automatically give it a default sub-element.
-    if (newItem.type === 'element') {
-      newItem.children = [{
-        id: crypto.randomUUID(),
-        type: 'sub-element',
-        name: 'Default Sub-element',
-        isExpanded: true,
-        children: [],
-        values: {}, // Start with empty values
-      }];
-    }
-    state.scope = findAndAddChild(state.scope, parentId, newItem);
-  })),
+  updateCellValue: (itemId, milestoneId, field, value) => set(produce(state => {
+    const updateValue = item => {
+      if (!item.values) item.values = {};
+      if (!item.values[milestoneId]) {
+        item.values[milestoneId] = { g: '', r: '', responsible: '', status1: '', status2: '' };
+      }
+      item.values[milestoneId][field] = value;
+      return item;
+    };
+    state.scope = findAndUpdate(state.scope, itemId, updateValue);
+    state.hasUnsavedChanges = true; // Set flag
+  })),
 
-  deleteItem: (itemId) => set(produce(state => {
-    state.scope = findAndRemove(state.scope, itemId);
-  })),
+  addItem: (parentId, newItem) => set(produce(state => {
+    // ... (default sub-element logic) ...
+    if (newItem.type === 'element') {
+      newItem.children = [{
+        id: crypto.randomUUID(),
+        type: 'sub-element',
+        name: 'Default Sub-element',
+        isExpanded: true,
+        children: [],
+        values: {}, 
+      }];
+    }
+    state.scope = findAndAddChild(state.scope, parentId, newItem);
+    state.hasUnsavedChanges = true; // Set flag
+  })),
+
+  deleteItem: (itemId) => set(produce(state => {
+    state.scope = findAndRemove(state.scope, itemId);
+    state.hasUnsavedChanges = true; // Set flag
+  })),
 }));

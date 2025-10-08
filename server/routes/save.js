@@ -1,24 +1,47 @@
 // /server/routes/save.js
+
 import express from 'express';
-// import Scope from '../models/Scope.js';
+import Planner from "../model/plannerModel.js";
 
 const router = express.Router();
 
-// Save scope data
+// Save scope data with user preferences integration
 router.post('/save', async (req, res) => {
-  try {
-    const { scope, milestones } = req.body;
+    const { scope, milestones, userId, title, description } = req.body;
+    console.log("📝 Saving planner data:", { scope, milestones, userId });
 
-    console.log(scope, milestones);
+   try {
+    // Create planner data object
+    const plannerData = {
+      scope: scope || [],
+      milestones: milestones || [],
+      userId: userId || null,
+      title: title || `Plan created on ${new Date().toLocaleDateString()}`,
+      description: description || ''
+    };
 
-    // // Option 1: Replace existing document (for simplicity)
-    // await Scope.deleteMany({});
-    // const savedScope = await Scope.create({ scope, milestones });
-
-    // res.status(200).json({ message: 'Scope saved successfully', data: savedScope });
+    const newPlanner = new Planner(plannerData);
+    const savedPlanner = await newPlanner.save();
+    
+    res.status(200).json({ 
+      success: true,
+      message: "Data saved successfully",
+      data: {
+        plannerId: savedPlanner._id,
+        createdAt: savedPlanner.createdAt
+      }
+    });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: 'Error saving scope', error: err.message });
+    console.error("❌ Error saving data:", err);
+    res.status(500).json({ 
+      success: false,
+      message: "Failed to save data",
+      error: err.message,
+      details: err.errors ? Object.keys(err.errors).map(key => ({
+        field: key,
+        message: err.errors[key].message
+      })) : null
+    });
   }
 });
 
